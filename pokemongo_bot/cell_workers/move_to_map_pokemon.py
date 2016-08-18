@@ -129,6 +129,7 @@ class MoveToMapPokemon(BaseTask):
         pokemon_list = []
         now = int(time.time())
 
+        # wild pokemon
         for pokemon in raw_data['pokemons']:
             try:
                 pokemon['encounter_id'] = long(base64.b64decode(pokemon['encounter_id']))
@@ -141,6 +142,33 @@ class MoveToMapPokemon(BaseTask):
             pokemon['name'] = self.pokemon_data[pokemon['pokemon_id'] - 1]['Name']
             pokemon['is_vip'] = pokemon['name'] in self.bot.config.vips
             pokemon['priority'] = self.config['catch'].get(pokemon['name'], 0)
+            pokemon['is_lured'] = False
+
+            pokemon['dist'] = distance(
+                self.bot.position[0],
+                self.bot.position[1],
+                pokemon['latitude'],
+                pokemon['longitude'],
+            )
+
+            pokemon_list.append(pokemon)
+
+        # lured pokemon
+        for pokestop in raw_data['pokestops']:
+            pokemon_id = pokestop['active_pokemon_id']
+            if pokemon_id < 1:
+                continue
+
+            pokemon = {}
+            pokemon['pokemon_id'] = pokemon_id
+            pokemon['name'] = self.pokemon_data[pokemon_id - 1]['Name']
+            pokemon['latitude'] = pokestop['latitude']
+            pokemon['longitude'] = pokestop['longitude']
+            pokemon['disappear_time'] = pokestop['lure_expiration']
+            pokemon['is_vip'] = pokemon['name'] in self.bot.config.vips
+            pokemon['priority'] = self.config['catch'].get(pokemon['name'], 0)
+            pokemon['is_lured'] = True
+            pokemon['fort_id'] = pokestop['pokestop_id']
 
             pokemon['dist'] = distance(
                 self.bot.position[0],
@@ -154,17 +182,19 @@ class MoveToMapPokemon(BaseTask):
         return pokemon_list
 
     def add_caught(self, pokemon):
-        for caught_pokemon in self.caught:
-            if caught_pokemon['encounter_id'] == pokemon['encounter_id']:
-                return
         if len(self.caught) >= 200:
             self.caught.pop(0)
         self.caught.append(pokemon)
 
     def was_caught(self, pokemon):
         for caught_pokemon in self.caught:
-            if pokemon['encounter_id'] == caught_pokemon['encounter_id']:
-                return True
+            if pokemon.get('is_lured', False) == caught_pokemon.get('is_lured', False):
+                # wild: match encounter_id
+                if not pokemon['is_lured'] and pokemon['encounter_id'] == caught_pokemon['encounter_id']:
+                    return True
+                # lured match fort_id and disappear time
+                if pokemon['is_lured'] and pokemon['fort_id'] == caught_pokemon['fort_id'] and pokemon['disappear_time'] == caught_pokemon['disappear_time']:
+                    return True
         return False
 
     def update_map_location(self):
@@ -219,6 +249,27 @@ class MoveToMapPokemon(BaseTask):
         last_position = self.bot.position[0:2]
         self.bot.heartbeat()
         self._teleport_to(pokemon)
+
+        if pokemon['is_lured']:
+            #we need to get the encounter_id first, which is only possible after the teleport
+            cell = self.bot.get_meta_cell()
+            for fort in cell['forts']:
+                if fort['id'] == pokemon['fort_id']:
+                    encounter_id = fort.get('lure_info', {}).get('encounter_id', None)
+                    break
+            if not encounter_id:
+                details = fort_details(self.bot, fort_id=pokemon['fort_id'],
+                              latitude=pokemon['latitude'],
+                              longitude=pokemon['longitude'])
+                fort_name = details.get('name', 'Unknown').encode('utf8', 'replace')
+                self.emit_event(
+                    'lured_pokemon_not_found',
+                    formatted='Lured pokemon at fort {fort_name} ({fort_id})',
+                    data={'fort_name': fort_name, 'fort_id': pokemon['fort_id']}
+                )
+                return
+            pokemon['encounter_id'] = encounter_id
+
         catch_worker = PokemonCatchWorker(pokemon, self.bot, self.config)
         api_encounter_response = catch_worker.create_encounter_api_call()
         time.sleep(SNIPE_SLEEP_SEC)
