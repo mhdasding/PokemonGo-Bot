@@ -95,6 +95,22 @@ class MoveToMapPokemon(BaseTask):
                 open(data_file)
             )
 
+    def should_target(self, pokemon):
+        now = int(time.time())
+        if pokemon['name'] not in self.config['catch'] and not pokemon['is_vip']:
+            return False
+        if pokemon['disappear_time'] < (now + self.config['min_time']):
+            return False
+        if self.was_caught(pokemon):
+            return False
+        if pokemon['dist'] > self.config['max_distance'] and not self.config['snipe']:
+            return False
+        # pokemon not reachable with mean walking speed (by config)
+        mean_walk_speed = (self.bot.config.walk_max + self.bot.config.walk_min) / 2
+        if pokemon['dist'] > ((pokemon['disappear_time'] - now) * mean_walk_speed) and not self.config['snipe']:
+            return False
+        return True
+
     def get_pokemon_from_map(self):
         try:
             req = requests.get('{}/{}?gyms=false&scanned=false'.format(self.config['address'], self.map_path))
@@ -119,17 +135,11 @@ class MoveToMapPokemon(BaseTask):
             except TypeError:
                 self._emit_failure('base64 error: {}'.format(pokemon['encounter_id']))
                 continue
+
             pokemon['spawn_point_id'] = pokemon['spawnpoint_id']
             pokemon['disappear_time'] = int(pokemon['disappear_time'] / 1000)
             pokemon['name'] = self.pokemon_data[pokemon['pokemon_id'] - 1]['Name']
             pokemon['is_vip'] = pokemon['name'] in self.bot.config.vips
-
-            if pokemon['name'] not in self.config['catch'] and not pokemon['is_vip']:
-                continue
-
-            if self.was_caught(pokemon):
-                continue
-
             pokemon['priority'] = self.config['catch'].get(pokemon['name'], 0)
 
             pokemon['dist'] = distance(
@@ -138,14 +148,6 @@ class MoveToMapPokemon(BaseTask):
                 pokemon['latitude'],
                 pokemon['longitude'],
             )
-
-            if pokemon['dist'] > self.config['max_distance'] and not self.config['snipe']:
-                continue
-
-            # pokemon not reachable with mean walking speed (by config)
-            mean_walk_speed = (self.bot.config.walk_max + self.bot.config.walk_min) / 2
-            if pokemon['dist'] > ((pokemon['disappear_time'] - now) * mean_walk_speed) and not self.config['snipe']:
-                continue
 
             pokemon_list.append(pokemon)
 
@@ -246,6 +248,7 @@ class MoveToMapPokemon(BaseTask):
         self.dump_caught_pokemon()
 
         pokemon_list = self.get_pokemon_from_map()
+        pokemon_list = [p for p in pokemon_list if self._should_target(p)]
         pokemon_list.sort(key=lambda x: x['dist'])
         if self.config['mode'] == 'priority':
             pokemon_list.sort(key=lambda x: x['priority'], reverse=True)
